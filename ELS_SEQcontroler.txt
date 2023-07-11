@@ -1,0 +1,142 @@
+//////////
+////////// このスケッチが行うことは、
+//////////   1. SEQスイッチ1,2,3,4のON/OFF
+//////////   2. リズムスタートの送信
+//////////   3. バーシグナルの表示
+////////// です。リズムスタートした時点でSEQスイッチの状況は全OFFにします。
+//////////（リズムスタートした後に、実際のシーケンスの点灯状況をELと同期することは難しいため、STARTを押した後はバーシグナルの表示しか行いません。）
+
+#include <MIDI.h>
+
+// MIDIのおまじない
+MIDI_CREATE_INSTANCE(HardwareSerial, Serial, MIDI);
+
+// ピンの定義。
+const static uint8_t swButton[5] = {12,9,A0,6,13};
+const static uint8_t swLED[5] = {5,8,10,7,11};
+
+// バーシグナルのsysEX。
+byte barSignal[8] = {0xf0,0x43,0x70,0x70,0x78,0x0,0x0,0xf7};
+// バーシグナルLEDを点灯中かどうかを記録する変数。
+bool isBeatLedOn = false;
+// バーシグナルを点灯開始した時刻を入れる変数。
+unsigned long beatTime = 0;
+
+// 長押し判定用のゲージ変数。swCounter[0]がseq1、swCounter[1]がseq2、swCounter[2]がseq3、swCounter[3]がseq4、swCounter[4]はSTARTボタンのカウンタになっている。
+// 長押し判定のしきい値を超えたとき、一回だけ「ボタンが押された」という解釈をする。
+unsigned int swCounter[5] = {0,0,0,0,0};
+//長押し判定のしきい値。
+const unsigned long pressedcount = 300;
+
+// ボタンが押されたことを報告する変数
+// loopの最後の方にあるボタンゲージの部分の中でtrue/falseを判定する
+// 「押された」なら1。
+int ispressed[5] = {0,0,0,0,0};
+
+// 現在のSEQのオンオフがどちらなのかを保存する変数
+// 「オン」なら1。
+int isSeqon[4] = {0,0,0,0};
+
+// ビート表示用LEDの光の長さ。単位はms。
+const unsigned long beatLedDuration = 20;
+
+/*/////////////////////////////////////////////
+///////////////////////////////////////////////
+                S E T   U P
+///////////////////////////////////////////////
+/////////////////////////////////////////////*/
+
+void setup() {
+  MIDI.begin(MIDI_CHANNEL_OMNI);  // MIDI通信を開始　全チャンネルをListen
+  MIDI.turnThruOff();             // MIDI Thruをオフ
+  MIDI.setHandleSystemExclusive(HandleSysEX);
+
+  // LEDなどの設定
+  for(int i=0; i<5; i++){
+    pinMode(swButton[i],INPUT_PULLUP);
+    pinMode(swLED[i],OUTPUT);
+    digitalWrite(swLED[i],LOW);
+  }
+}
+/*/////////////////////////////////////////////
+///////////////////////////////////////////////
+                   L O O P
+///////////////////////////////////////////////
+/////////////////////////////////////////////*/
+void loop() {
+  
+  MIDI.read();
+
+  // バーシグナルのLEDが点灯中で、消灯するべきなら消灯する。
+  if(isBeatLedOn){
+    if(millis() - beatTime > beatLedDuration){
+      isBeatLedOn = false;
+      digitalWrite(swLED[4],LOW);
+    }
+  }
+  
+  // ispressed[i]が1になったときに呼ばれる場所。SEQボタンを光らせ/消したり、MIDIを送信したりする。
+  for(byte i=0; i<5; i++){
+    if(ispressed[i]==1){
+      ispressed[i]=0;
+      if(i<4){ //押されたのがSEQボタンのとき
+        if(isSeqon[i]==0){
+          digitalWrite(swLED[i],HIGH);
+          isSeqon[i]=1;
+          byte sendMessage[10] = {0xF0,0x43,0x70,0x78,0x44,0x13,0x01,i,0x01,0xF7};
+          MIDI.sendSysEx(10,sendMessage,true);
+        }else{
+          digitalWrite(swLED[i],LOW);
+          isSeqon[i]=0;
+          byte sendMessage[10] = {0xF0,0x43,0x70,0x78,0x44,0x13,0x01,i,0x00,0xF7};
+          MIDI.sendSysEx(10,sendMessage,true);
+        }
+      }else{ //押されたのがSTARTボタンのとき
+        for(byte j=0; j<4; j++){ //STARTボタンが押されたらSeqの状況をすべて初期状態に戻す。
+          isSeqon[j]=0;
+          digitalWrite(swLED[j],LOW);
+        }
+        byte sendMessage[5] = {0xF0,0x43,0x60,0x7A,0xF7};
+        MIDI.sendSysEx(5,sendMessage,true);
+      }
+    }
+  }
+
+  //それぞれのボタンが押されているかどうかを判定する場所。
+  for(int i=0; i<5; i++){
+    if(digitalRead(swButton[i])==LOW){ // i番目のボタンが押されていたら
+      if(swCounter[i] == pressedcount){ // 長押し判定になったら
+        swCounter[i] = pressedcount + 1;
+        ispressed[i] = 1;
+      }
+      if(swCounter[i] < pressedcount){ // まだ長押し判定じゃなかったら
+        swCounter[i]++;
+        ispressed[i] = 0;
+      }
+    }else{  // i番目のボタンが離されていたら
+      swCounter[i] = 0;
+      ispressed[i] =0;
+    }
+  }
+}
+
+/*/////////////////////////////////////////////
+///////////////////////////////////////////////
+                  HANDLER
+///////////////////////////////////////////////
+/////////////////////////////////////////////*/
+void HandleSysEX(byte* sysExArray, unsigned sysExLength) { //バーシグナルが来たかどうかだけ監視する予定。
+  if(sysExLength==8){
+    bool this_is_barSignal = true;
+    for(byte i=0; i<8; i++){
+      if(sysExArray[i] != barSignal[i]){
+        this_is_barSignal = false;
+      }
+    }
+    if(this_is_barSignal){
+      digitalWrite(swLED[4],HIGH);
+      isBeatLedOn = true;
+      beatTime = millis();
+    }
+  }
+}
